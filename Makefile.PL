@@ -4,6 +4,6 @@ use ExtUtils::MakeMaker;
 WriteMakefile(
     'NAME'			=> 'Unix::Conf',
     'VERSION_FROM'	=> 'Conf.pm',
-    'PREREQ_PM'		=> {},
+    'PREREQ_PM'		=> { Fcntl	=> 1.03 },
     'AUTHOR'		=> 'Karthik Krishnamurthy <karthik.k@extremix.net>'
 );

@@ -28,7 +28,7 @@ use warnings;
 use Unix::Conf::Err;
 use Unix::Conf::ConfIO;
 
-$Unix::Conf::VERSION = "0.1";
+$Unix::Conf::VERSION = "0.2";
 
 =over 4
 
@@ -174,9 +174,10 @@ None that I know of.
 =head1 AVAILABILITY
 
 This module is available from
-http://www.extremix.net/UnixConf/Unix-Conf-0.1.tar.gz
+http://www.extremix.net/UnixConf/
 
-It is also available from CPAN under my PAUSE ID: KARTHIKK.
+It is also available from CPAN
+http://www.cpan.org/modules/by-authors/id/K/KA/KARTHIKK/
 
 =head1 LICENCE
 

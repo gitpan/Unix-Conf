@@ -238,7 +238,8 @@ sub die (;$)
 
 # Overloaded functions
 use overload	'""'	=> \&__interpret_as_string,
-				'bool'	=> \&__interpret_as_bool;
+				'bool'	=> \&__interpret_as_bool,
+				'eq'	=> \&__interpret_as_string;
 
 sub __interpret_as_string
 {
@@ -250,6 +251,7 @@ sub __interpret_as_string
 sub __interpret_as_bool
 {
 	my $self = shift;
+	#return (exists ($self->{PREFIX}) ? undef : 1);
 	return (exists ($self->{PREFIX}) ? 0 : 1);
 }
 

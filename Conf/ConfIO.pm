@@ -48,7 +48,8 @@ use Unix::Conf;
 
 use overload '<>'	=> 'getline',
 			 'bool'	=> '__interpret_as_bool',
-			 '""'	=> '__interpret_as_string';
+			 '""'	=> '__interpret_as_string',
+			 'eq'	=> '__interpret_as_string';
 
 # Cache of file keyed on filenames. Value is a hash reference.
 # {
@@ -85,6 +86,7 @@ my %Calling_Modules;
 
     Arguments
     NAME        => 'PATHNAME',
+	FH			=> filehandle			# filehandle, reference to a filehandle
     MODE        => FILE_OPEN_MODE,      # default is O_RDWR | O_CREAT
     PERMS       => FILE_CREATION_PERMS, # default is 0600
     LOCK_STYLE  => 'flock'/'dotlock',   # default is 'flock'
@@ -94,7 +96,11 @@ my %Calling_Modules;
 Class constructor. 
 Creates a ConfIO object which is associated with the file. 
 Releasing the object automatically syncs with the disk version of 
-the file. MODE and PERMS are the same as for sysopen. LOCK_STYLE 
+the file. Passing an open filehandle with FH creates a 
+Unix::Conf::ConfIO object representing the open file. Take care
+to open FH in both read & write mode, because Unix::Conf::ConfIO
+reads in the whole file into an in core array as of now.
+MODE and PERMS are the same as for sysopen. LOCK_STYLE 
 is for choosing between different locking methods. 'dotlock' is 
 used for locking '/etc/passwd', '/etc/shadow', '/etc/group', 
 '/etc/gshadow'. 'flock' is the default locking style. If the 
@@ -102,7 +108,8 @@ value of SECURE_OPEN is 1, it enables a check to see if PATHNAME
 is secure. PERSIST is used to keep files open till release () 
 or release_all () is called even though the object may go out 
 of scope in the calling code. It reduces the overhead of 
-managing ancillary files. 
+managing ancillary files. Otherwise the file locks associated
+with the file would be released for these anciallary files.
 TODO: Need to implement ability to accept open filehandles,
 IO::Handle, IO::File objects too.
 NOTE: This method should not be used directly. Instead use
@@ -116,6 +123,11 @@ Unix::Conf::_open_conf () which has the same syntax.
         SECURE_OPEN		=> 1,
         LOCK_STYLE		=> 'dotlock',
     ) or $conf->die ("Could not open '/etc/passwd'");
+
+	# or attach a filehandle to a Unix::Conf object.
+    $conf = Unix::Conf->_open_conf (
+		FH				=> FH,		# or any object that represents an open filehandle
+    ) or $conf->die ("Could not attach FH");
 
 =cut
 	
@@ -133,65 +145,90 @@ sub open
 
 	my ($fh, $name, $timestamp, $retval);
 
-	# Get and validate arguments
-	defined ($args->{NAME})
-		or return (Unix::Conf->_err ('open', 'filename not specified'));
-		
-	$fh = $File_Cache{$args->{NAME}} = $args
-		unless (($fh = $File_Cache{$args->{NAME}}));
+	# do sanity check on the passed argument
+	return (Unix::Conf->_err ('open', "neither filename nor filehandle passed"))
+		unless (defined ($args->{FH}) || defined ($args->{NAME}));
 
-	# if file is locked in our cache return Err
-	return (Unix::Conf->_err ('open', "`$fh->{NAME}' already in use, locked"))
-		if ($fh->{IN_USE});
+	if ($args->{FH}) {
+		return (Unix::Conf->_err ("open", "`$args->{LOCK_STYLE}' illegal with FH"))
+			if ($args->{LOCK_STYLE} ne 'flock');
+		return (Unix::Conf->_err ("open", "`SECURE_OPEN' illegal with FH"))
+			if ($args->{SECURE_OPEN});
+		# store the filehandle name as the name of the file.
+		# this is needed for persistent opens where the handle 
+		# is cached in $Calling_Modules.
+		$args->{NAME} = "$args->{FH}";
+		$args->{FILEHANDLE_PASSED} = 1;
+		$fh = $File_Cache{$args->{NAME}} = $args
+			unless (($fh = $File_Cache{$args->{NAME}}));
+		# fh now contains the old ConfIO object if one with the same
+		# name exists
+
+		# if file is locked in our cache return Err
+		return (Unix::Conf->_err ('open', "`$fh->{NAME}' already in use, locked"))
+			if ($fh->{IN_USE});
+		$retval = __lock ($fh) or return ($retval);
+	}
+	elsif ($args->{NAME}) {
+		$fh = $File_Cache{$args->{NAME}} = $args
+			unless (($fh = $File_Cache{$args->{NAME}}));
+		# fh now contains the old ConfIO object if one with the same
+		# name exists
+
+		# if file is locked in our cache return Err
+		return (Unix::Conf->_err ('open', "`$fh->{NAME}' already in use, locked"))
+			if ($fh->{IN_USE});
 	
-	# if FH exists, file must be a persistent one. we call __checkpath
-	# if SECURE_OPEN was specified, and not before. However any change in
-	# modes we barf
-	if ($fh->{FH}) {
-		my $ret;
-		$ret = __checkpath ($fh->{NAME}) or return ($ret)
-			if ($args->{SECURE_OPEN} > $fh->{SECURE_OPEN});
-		my ($oldmode, $newmode);
-		$oldmode = $fh->{MODE} & (O_RDONLY | O_WRONLY | O_RDWR);
-		$newmode = $args->{MODE} & (O_RDONLY | O_WRONLY | O_RDWR);
-		return (Unix::Conf->_err ('open', "mode is not the same as in the original open"))
-			if ($oldmode != $newmode); 
-	}
+		# if FH exists, file must be a persistent one. we call __checkpath
+		# if SECURE_OPEN was specified, and not before. However any change in
+		# modes we barf
+		if ($fh->{FH}) {
+			my $ret;
+			$ret = __checkpath ($fh->{NAME}) or return ($ret)
+				if ($args->{SECURE_OPEN} > $fh->{SECURE_OPEN});
+			my ($oldmode, $newmode);
+			$oldmode = $fh->{MODE} & (O_RDONLY | O_WRONLY | O_RDWR);
+			$newmode = $args->{MODE} & (O_RDONLY | O_WRONLY | O_RDWR);
+			return (Unix::Conf->_err ('open', "mode is not the same as in the original open"))
+				if ($oldmode != $newmode); 
+		}
+		else {
+			# file is not in cache, or is but had been previously closed.
+			# we need to open file even if our cache has good data, and lock the file
+			$fh->{FH} = __open (
+								$fh->{NAME}, 
+								$fh->{MODE}, 
+								$fh->{PERMS}, 
+								$fh->{SECURE_OPEN}
+			) or return ($fh->{FH});
 
-	# file is not in cache, or is but had been previously closed.
-	# we need to open file even if our cache has good data, and lock the file
-	$fh->{FH} = __open (
-						$fh->{NAME}, 
-						$fh->{MODE}, 
-						$fh->{PERMS}, 
-						$fh->{SECURE_OPEN}
-	) or return ($fh->{FH});
-
-	unless ($retval = __lock ($fh)) {
-		close ($fh->{FH});
-		return ($retval);
+			unless ($retval = __lock ($fh)) {
+				close ($fh->{FH});
+				return ($retval);
+			}
+		}
 	}
-	$timestamp = (stat ($args->{NAME}))[9];
+	# check timestamp even if file was held in persistent store and locked
+	$timestamp = (stat ($fh->{FH}))[9];
 	# if we had previously cached the file and it has not changed since
 	# bless and return.
-	goto RET
-		if ($fh->{TIMESTAMP} && $fh->{TIMESTAMP} == $timestamp);
+	if (!defined ($fh->{TIMESTAMP}) || $fh->{TIMESTAMP} != $timestamp) {
+		# if we reach here, either we don't have the file in our cache, 
+		# the cache is stale.
+		return (Unix::Conf->_err ("open")) unless (seek ($fh->{FH}, 0, 0));
+		my @lines = readline ($fh->{FH});
+		@$fh{'DATA', 'TIMESTAMP'} = (\@lines, $timestamp);
+	}
 
-	# if we reach here, either we don't have the file in our cache or
-	# the cache is stale
-	my @lines = readline ($fh->{FH});
-	@$fh{'DATA', 'TIMESTAMP'} = (\@lines, $timestamp);
-
-RET:
 	@$fh{'LINENO', 'DIRTY'} = (-1, 0);
 	$fh->{IN_USE} = 1;
-	my $instance = $fh->{NAME};
-	my $obj = bless (\$instance, $class);
 	# store files that the calling module wants persisted. subsequently
 	# when release_all is called by the same module, these will be actually 
 	# released (locks)
 	$Calling_Modules{__caller ()}{$fh->{NAME}} = 1
 		if ($fh->{PERSIST});
+	my $instance = $fh->{NAME};
+	my $obj = bless (\$instance, $class);
 	return ($obj);
 }
 
@@ -219,18 +256,15 @@ sub close
 	# sync file if dirty
 	if ($file->{DIRTY}) {
 		truncate ($file->{FH}, 0) or return (Unix::Conf->_err ("truncate"));
-		# repos file pointer at start of file.
 		sysseek ($file->{FH}, 0, 0) or return (Unix::Conf->_err ("sysseek"));
 
 		# suppress warnings so that we don't get a warning about empty
 		# array elements that we delete'ed.
 		no warnings;
-		# better to loop than to do something like "@{$$file{DATA}}".
-		# that would be too memory consuming.
 		syswrite ($file->{FH}, $_ ) for (@{$$file{DATA}});
 	}
 
-	$file->{TIMESTAMP} = (stat ($file->{NAME}))[8];	# store new timestamp.
+	$file->{TIMESTAMP} = (stat ($file->{FH}))[8];	# store new timestamp.
 	$file->{IN_USE} = 0;
 
 	# if persistent file, do not close
@@ -238,6 +272,7 @@ sub close
 
 	close ($file->{FH}) || return (Unix::Conf->_err ('close'));
 	__unlock ($file);
+	delete ($File_Cache{$file->{NAME}}) if ($file->{FILEHANDLE_PASSED});
 	undef ($file->{FH});
 	return (1);
 }
@@ -456,13 +491,25 @@ sub delete
 =item lineno ()
 
 Object method.
-Returns the current lineno of the ConfIO object.
+Get/set the current lineno of the ConfIO object.
 
 =cut
 
 sub lineno 		
 { 
 	my $self 	= $File_Cache{${shift ()}};
+	my $lineno	= shift ();
+	if (defined ($lineno)) {
+		return (Unix::Conf->_err ('lineno', "argument passed not numeric"))
+			if ($lineno !~ /^-?\d+$/);
+		return (Unix::Conf->_err ('lineno', "`$lineno' value illegal"))
+			if ($lineno < -1);
+		my $max = $#{$self->{DATA}};
+		return (Unix::Conf->_err ('lineno', "argument passed out of bounds, max possible `$max'"))
+			if ($lineno > $max);
+		$self->{LINENO} = $lineno;
+		return (1);
+	}
 	return ($self->{LINENO}); 	
 }
 
@@ -571,7 +618,7 @@ sub __caller { return ((caller (1))[0]); }
 
 # If a ConfIO object has a defined filehandle it is true, else false
 sub __interpret_as_bool	
-{ 	
+{
 	my $self = $File_Cache{${shift ()}};
 	return ($self->{IN_USE}); 
 }
@@ -580,7 +627,7 @@ sub __interpret_as_string
 {
 	my $self = shift;
 	return "$$self";
-}	
+}
 
 sub __lock ($)
 {
@@ -728,9 +775,7 @@ Beta
 
 =head1 TODO
 
-It would be better to have this module accept opened filehandles, or
-IO::Handle, IO::File objects too instead of the filename. That would
-automatically mean that SECURE_OPEN checks will not be performed.
+This module should accept a scalar representing a file too.
 
 =head1 BUGS
 

@@ -5,3 +5,4 @@ Conf/Err.pm
 Makefile.PL
 MANIFEST
 README
+test.pl
